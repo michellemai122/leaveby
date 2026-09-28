@@ -1,0 +1,285 @@
+<!doctype html>
+<!--
+  PROTOTYPE — throwaway. Answers ticket #8 "What does the live map look like?"
+  Three structurally different landing screens, switchable via ?variant=A|B|C (bottom bar or ← →).
+  Data: a real MTA snapshot captured by prep_map.py (subway trip predictions + live bus positions + alerts + elevator outages).
+  The "model" prediction is MOCK (official time + synthetic drift). The agent chat is scripted.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>LeaveBy — live map prototype</title>
+<link href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
+<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/deck.gl@9.0.38/dist.min.js"></script>
+<script src="map_data.js"></script>
+<style>
+  :root { --bg:#0b0d12; --panel:rgba(16,19,26,.92); --line:#232a36; --fg:#e8ecf2; --dim:#8a94a6; --accent:#7cf0c5; --warn:#ffb547; --bad:#ff5c6c; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg); font:14px/1.4 -apple-system, "Inter", system-ui, sans-serif; overflow:hidden; }
+  #map { position:absolute; inset:0; }
+  .panel { position:absolute; background:var(--panel); border:1px solid var(--line); border-radius:14px; backdrop-filter:blur(8px); }
+  .bullet { display:inline-grid; place-items:center; width:22px; height:22px; border-radius:50%; font-weight:700; font-size:12px; color:#fff; flex:none; }
+  .muted { color:var(--dim); }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  .hidden { display:none !important; }
+  .brand { font-weight:800; letter-spacing:-.02em; font-size:20px; }
+  .brand b { color:var(--accent); }
+  .pill { display:inline-flex; gap:6px; align-items:center; padding:3px 9px; border-radius:99px; background:#1a2030; font-size:12px; }
+  .dot { width:7px; height:7px; border-radius:50%; background:var(--accent); box-shadow:0 0 8px var(--accent); animation:pulse 1.6s infinite; }
+  @keyframes pulse { 50% { opacity:.35 } }
+  button { font:inherit; color:inherit; background:#1a2030; border:1px solid var(--line); border-radius:8px; padding:5px 10px; cursor:pointer; }
+  button.on { background:var(--accent); color:#06140f; border-color:var(--accent); }
+
+  /* ---------- Variant A: Mission control ---------- */
+  #A-top { top:16px; left:16px; right:16px; padding:12px 16px; display:flex; gap:18px; align-items:center; }
+  #A-top .stat { display:flex; flex-direction:column; }
+  #A-top .stat b { font-size:20px; }
+  #A-status { top:92px; left:16px; width:300px; bottom:80px; padding:12px; overflow:auto; }
+  #A-status .row { display:flex; gap:10px; padding:8px 4px; border-bottom:1px solid var(--line); }
+  #A-status .row:last-child { border:0; }
+  #A-chatbtn { right:20px; bottom:80px; padding:12px 18px; border-radius:99px; background:var(--accent); color:#06140f; font-weight:700; cursor:pointer; border:0; }
+
+  /* ---------- Variant B: Commute-first ---------- */
+  #B-side { top:0; left:0; bottom:0; width:400px; border-radius:0; border-width:0 1px 0 0; padding:22px; display:flex; flex-direction:column; gap:16px; overflow:auto; }
+  #B-side .big { font-size:64px; font-weight:800; letter-spacing:-.03em; line-height:1; }
+  #B-side .leg { display:flex; gap:12px; align-items:flex-start; padding:10px 0; border-bottom:1px dashed var(--line); }
+  #B-side .card { background:#141925; border:1px solid var(--line); border-radius:12px; padding:14px; }
+  #B-chat { flex:1; min-height:220px; display:flex; flex-direction:column; }
+
+  /* ---------- Variant C: Model vs MTA ---------- */
+  #C-top { top:16px; left:16px; padding:14px 18px; max-width:420px; }
+  #C-board { top:16px; right:16px; width:330px; bottom:130px; padding:14px; overflow:auto; }
+  #C-board .row { display:grid; grid-template-columns:26px 1fr auto; gap:10px; align-items:center; padding:7px 0; border-bottom:1px solid var(--line); }
+  #C-bottom { left:16px; right:16px; bottom:70px; padding:10px 16px; display:flex; gap:16px; align-items:center; }
+  #C-bottom input { flex:1; accent-color:var(--accent); }
+  .gap-bar { height:6px; border-radius:3px; background:linear-gradient(90deg,var(--accent),var(--warn),var(--bad)); }
+
+  /* ---------- Shared chat ---------- */
+  .chat { display:flex; flex-direction:column; gap:10px; }
+  .chat .log { flex:1; overflow:auto; display:flex; flex-direction:column; gap:10px; }
+  .msg { padding:9px 12px; border-radius:12px; max-width:92%; }
+  .msg.user { align-self:flex-end; background:#243049; }
+  .msg.bot { background:#141925; border:1px solid var(--line); }
+  .tool { font-size:12px; padding:6px 10px; border-radius:8px; background:#0f1a17; border:1px solid #1d3a31; color:#9fe8cf; }
+  .chat form { display:flex; gap:8px; }
+  .chat input { flex:1; background:#0f131b; border:1px solid var(--line); color:var(--fg); border-radius:10px; padding:10px; font:inherit; }
+  #A-chat { right:20px; bottom:80px; width:380px; height:480px; padding:14px; }
+
+  /* ---------- Prototype switcher (not part of the design) ---------- */
+  #switcher { position:fixed; bottom:14px; left:50%; transform:translateX(-50%); z-index:99; display:flex; gap:10px; align-items:center;
+    background:#fff; color:#111; padding:6px 8px; border-radius:99px; box-shadow:0 6px 24px rgba(0,0,0,.5); font:600 13px system-ui; }
+  #switcher button { background:#111; color:#fff; border:0; border-radius:99px; width:30px; height:30px; padding:0; }
+  #speed { position:fixed; bottom:18px; right:16px; z-index:98; display:flex; gap:6px; }
+  @media (max-width:760px) { #B-side { width:100%; height:55%; top:auto; } #A-status, #C-board { display:none; } #A-chat { left:12px; right:12px; width:auto; } }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<!-- Variant A -->
+<div data-v="A" class="panel" id="A-top">
+  <div class="brand">Leave<b>By</b></div>
+  <span class="pill"><span class="dot"></span>LIVE <span class="mono" id="A-clock"></span></span>
+  <div class="stat"><b id="A-trains"></b><span class="muted">trains moving</span></div>
+  <div class="stat"><b id="A-buses"></b><span class="muted">buses</span></div>
+  <div class="stat"><b id="A-alerts"></b><span class="muted">lines with alerts</span></div>
+  <div class="stat"><b id="A-elev"></b><span class="muted">elevators out</span></div>
+</div>
+<div data-v="A" class="panel" id="A-status"><div class="muted" style="margin-bottom:6px">Line status</div><div id="A-rows"></div></div>
+<button data-v="A" class="panel" id="A-chatbtn">⏰ Set my leave-by alarm</button>
+<div data-v="A" class="panel chat hidden" id="A-chat"></div>
+
+<!-- Variant B -->
+<div data-v="B" class="panel" id="B-side">
+  <div style="display:flex;justify-content:space-between;align-items:center"><div class="brand">Leave<b>By</b></div><span class="pill"><span class="dot"></span>tracking</span></div>
+  <div class="card">
+    <div class="muted">Morning commute · arrive by <b style="color:var(--fg)">10:00</b></div>
+    <div style="margin:6px 0 2px">Bedford Av → 116 St–Columbia</div>
+    <div class="muted" style="margin-top:14px">Leave by</div>
+    <div class="big mono" id="B-leave">9:18</div>
+    <div id="B-count" class="muted"></div>
+    <div style="margin-top:8px" class="pill" id="B-shift">↑ 2 min earlier than usual: L running slow</div>
+  </div>
+  <div>
+    <div class="leg"><span class="bullet" style="background:#555">🚶</span><div>Walk to Bedford Av<br><span class="muted">4 min</span></div></div>
+    <div class="leg"><span class="bullet" style="background:#A7A9AC">L</span><div>L to 14 St–6 Av<br><span class="muted">next: <span class="mono">MTA 3 min · LeaveBy 4 min</span></span></div></div>
+    <div class="leg"><span class="bullet" style="background:#EE352E">1</span><div>1 to 116 St–Columbia<br><span class="muted">⚠ elevator out at 14 St transfer: +1 min stairs</span></div></div>
+  </div>
+  <div id="B-chat" class="chat"></div>
+</div>
+
+<!-- Variant C -->
+<div data-v="C" class="panel" id="C-top">
+  <div class="brand">Leave<b>By</b> <span class="muted" style="font-weight:500;font-size:14px">/ model vs MTA</span></div>
+  <div style="margin-top:8px">Each train is drawn twice: <b>○ MTA's official prediction</b> and <b style="color:var(--accent)">● LeaveBy's model</b>. The tether shows where they disagree.</div>
+  <div class="muted" style="margin-top:6px;font-size:12px">Model positions are MOCK in this prototype; the real model ships in v2.</div>
+  <div style="display:flex;gap:18px;margin-top:10px">
+    <div><b class="mono" id="C-mae" style="font-size:22px"></b><div class="muted">median gap</div></div>
+    <div><b class="mono" id="C-p90" style="font-size:22px"></b><div class="muted">p90 gap</div></div>
+  </div>
+</div>
+<div data-v="C" class="panel" id="C-board"><div class="muted" style="margin-bottom:6px">Biggest disagreements right now</div><div id="C-rows"></div></div>
+<div data-v="C" class="panel" id="C-bottom">
+  <span class="mono" id="C-time"></span>
+  <input type="range" id="C-scrub" min="0" max="1200" value="0" />
+  <span class="muted">+20 min of predicted motion</span>
+</div>
+
+<div id="speed"><button data-s="1">1×</button><button data-s="10" class="on">10×</button><button data-s="40">40×</button></div>
+<div id="switcher"><button id="prev">←</button><span id="vlabel"></span><button id="next">→</button></div>
+
+<script>
+const D = window.LEAVEBY_DATA;
+const VARIANTS = { A: "Mission control", B: "Commute-first", C: "Model vs MTA" };
+const hex = h => [parseInt(h.slice(1,3),16), parseInt(h.slice(3,5),16), parseInt(h.slice(5,7),16)];
+const rc = r => hex((D.routes[r] || D.routes[r.replace(/X$/,"")] || {c:"#808183"}).c);
+let variant = new URLSearchParams(location.search).get("variant") || "A";
+let speed = 10, simT = 0, last = performance.now(), scrubbing = false;
+const HORIZON = 1200;
+
+// position of a trip at time t along path/timestamps
+function posAt(p, ts, t) {
+  if (t <= ts[0]) return p[0];
+  for (let i = 1; i < ts.length; i++) if (t <= ts[i]) {
+    const f = (t - ts[i-1]) / Math.max(1, ts[i] - ts[i-1]);
+    return [p[i-1][0] + (p[i][0]-p[i-1][0])*f, p[i-1][1] + (p[i][1]-p[i-1][1])*f];
+  }
+  return null;
+}
+
+const map = new maplibregl.Map({ container: "map", style: "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+  center: [-73.94, 40.72], zoom: 11, attributionControl: { compact: true } });
+const overlay = new deck.MapboxOverlay({ interleaved: false, layers: [] });
+map.addControl(overlay);
+
+const focusRoutes = new Set(["L", "1"]);
+const elevStations = D.elevators.map(e => {
+  const s = D.stations.find(s => s[2] === e.s); return s ? { ...e, pos: [s[0], s[1]] } : null; }).filter(Boolean);
+
+function layers() {
+  const t = simT;
+  const dimOthers = variant === "B";
+  const alpha = r => dimOthers && !focusRoutes.has(r) ? 40 : 255;
+  const heads = D.trips.map(tr => ({ tr, o: posAt(tr.p, tr.t, t), m: posAt(tr.p, tr.m, t) })).filter(h => h.o);
+  const L = [
+    new deck.PathLayer({ id: "lines", data: D.lines, getPath: d => d.p, getColor: d => [...rc(d.r), dimOthers && !focusRoutes.has(d.r) ? 25 : 90],
+      getWidth: d => dimOthers && focusRoutes.has(d.r) ? 6 : 2, widthUnits: "pixels", updateTriggers: { getColor: variant, getWidth: variant } }),
+    new deck.ScatterplotLayer({ id: "buses", data: D.buses, getPosition: d => [d[0], d[1]], getFillColor: [90, 150, 255, variant === "A" ? 150 : 45],
+      radiusMinPixels: 1.6, radiusMaxPixels: 3, getRadius: 20, updateTriggers: { getFillColor: variant } }),
+  ];
+  if (variant !== "C") {
+    L.push(new deck.TripsLayer({ id: "trails", data: D.trips, getPath: d => d.p, getTimestamps: d => d.t,
+      getColor: d => [...rc(d.r), alpha(d.r)], widthMinPixels: 3, trailLength: 180, currentTime: t, fadeTrail: true, capRounded: true, jointRounded: true,
+      updateTriggers: { getColor: variant } }));
+    L.push(new deck.ScatterplotLayer({ id: "heads", data: heads, getPosition: h => h.o, getFillColor: h => [...rc(h.tr.r), alpha(h.tr.r)],
+      getLineColor: h => [255,255,255, Math.min(220, alpha(h.tr.r))], stroked: true, lineWidthMinPixels: 1, radiusMinPixels: 4, getRadius: 40, pickable: true,
+      updateTriggers: { getFillColor: variant, getLineColor: variant } }));
+  } else {
+    const pairs = heads.filter(h => h.m);
+    L.push(new deck.LineLayer({ id: "tether", data: pairs, getSourcePosition: h => h.o, getTargetPosition: h => h.m,
+      getColor: h => gapColor(Math.abs(gapSec(h.tr, t))), getWidth: 2 }));
+    L.push(new deck.ScatterplotLayer({ id: "official", data: pairs, getPosition: h => h.o, filled: false, stroked: true,
+      getLineColor: [255,255,255,200], lineWidthMinPixels: 1.5, radiusMinPixels: 5, getRadius: 50 }));
+    L.push(new deck.ScatterplotLayer({ id: "model", data: pairs, getPosition: h => h.m, getFillColor: h => rc(h.tr.r), radiusMinPixels: 3.5, getRadius: 35, pickable: true }));
+  }
+  if (variant !== "C") L.push(new deck.ScatterplotLayer({ id: "elev", data: elevStations, getPosition: d => d.pos, getFillColor: [255, 92, 108],
+    getLineColor: [255,255,255], stroked: true, lineWidthMinPixels: 1, radiusMinPixels: 5, getRadius: 60, pickable: true }));
+  return L;
+}
+function gapSec(tr, t) { // model minus official, for the next stop ahead of t
+  const i = tr.t.findIndex(x => x > t); return i < 0 ? 0 : tr.m[i] - tr.t[i]; }
+function gapColor(g) { return g < 20 ? [124,240,197,200] : g < 60 ? [255,181,71,220] : [255,92,108,230]; }
+
+overlay.setProps({ getTooltip: ({ object: o }) => !o ? null :
+  o.tr ? `${D.routes[o.tr.r]?.n || o.tr.r} train → ${o.tr.to}\nnext: ${o.tr.nx}` : o.s ? `Elevator out: ${o.s} (${o.l})\n${o.w}\nback ${o.b}` : null });
+
+// ---------- panels ----------
+function fmtClock(t) { return new Date((D.t0 + t) * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" }); }
+document.getElementById("A-trains").textContent = D.trips.length;
+document.getElementById("A-buses").textContent = D.buses.length.toLocaleString();
+document.getElementById("A-alerts").textContent = Object.keys(D.alerts).length;
+document.getElementById("A-elev").textContent = D.elevators.length;
+const order = Object.entries(D.routes).filter(([k]) => D.lines.some(l => l.r === k)).sort((a,b) => a[1].n.localeCompare(b[1].n, undefined, { numeric: true }));
+document.getElementById("A-rows").innerHTML = order.map(([k, r]) => {
+  const a = D.alerts[k]; return `<div class="row"><span class="bullet" style="background:${r.c}">${r.n}</span>
+  <div>${a ? `<span style="color:var(--warn)">${a[0]}</span>` : `<span class="muted">Good service</span>`}</div></div>`; }).join("");
+
+function chat(el, opener) {
+  el.innerHTML = `<div class="log"><div class="msg bot">${opener}</div></div>
+    <form><input placeholder="e.g. get me to Columbia by 10, I hate transfers" /><button>Send</button></form>`;
+  const log = el.querySelector(".log");
+  el.querySelector("form").onsubmit = async ev => {
+    ev.preventDefault(); const inp = el.querySelector("input"); const q = inp.value.trim() || "Get me to Columbia by 10, I hate transfers"; inp.value = "";
+    const add = (cls, html) => { const d = document.createElement("div"); d.className = cls; d.innerHTML = html; log.appendChild(d); log.scrollTop = 1e9; };
+    add("msg user", q);
+    const steps = [
+      ["find_route", "Bedford Av → 116 St–Columbia · L + 1 · 1 transfer (fewest transfers)"],
+      ["get_predictions", "L @ Bedford Av: MTA 3 min · model 4 min (L running ~40 s slow)"],
+      ["check_alerts", `elevator out at 14 St · ${Object.keys(D.alerts).length} lines with alerts`],
+      ["set_alarm", "leave_by 9:18 · will re-check every 30 s"],
+    ];
+    for (const [n, r] of steps) { await new Promise(r => setTimeout(r, 550)); add("tool mono", `▸ ${n}() → ${r}`); }
+    await new Promise(r => setTimeout(r, 500));
+    add("msg bot", "Leave by <b>9:18</b>. L to 14 St, then the 1 uptown: arrives 9:56. The 14 St elevator is out, so I added a minute for stairs. I'll move the alarm if anything changes.");
+  };
+}
+chat(document.getElementById("A-chat"), "Where do you need to be, and by when?");
+chat(document.getElementById("B-chat"), "Ask me to change this commute or add another one.");
+document.getElementById("A-chatbtn").onclick = () => { document.getElementById("A-chat").classList.toggle("hidden"); };
+
+function updatePanels() {
+  document.getElementById("A-clock").textContent = fmtClock(simT);
+  document.getElementById("C-time").textContent = fmtClock(simT);
+  const leaveAt = D.t0 + 25 * 60, left = Math.max(0, leaveAt - (D.t0 + simT));
+  document.getElementById("B-count").textContent = `in ${Math.floor(left/60)} min ${String(Math.floor(left%60)).padStart(2,"0")} s`;
+  if (variant === "C") {
+    const gaps = D.trips.filter(tr => tr.t[0] <= simT && tr.t[tr.t.length-1] >= simT).map(tr => ({ tr, g: gapSec(tr, simT) }));
+    const abs = gaps.map(x => Math.abs(x.g)).sort((a,b) => a-b);
+    document.getElementById("C-mae").textContent = (abs[Math.floor(abs.length/2)] || 0) + " s";
+    document.getElementById("C-p90").textContent = (abs[Math.floor(abs.length*.9)] || 0) + " s";
+    document.getElementById("C-rows").innerHTML = gaps.sort((a,b) => Math.abs(b.g) - Math.abs(a.g)).slice(0, 14).map(({ tr, g }) =>
+      `<div class="row"><span class="bullet" style="background:${D.routes[tr.r]?.c || "#888"}">${D.routes[tr.r]?.n || tr.r}</span>
+       <div><div>→ ${tr.to}</div><div class="muted" style="font-size:12px">next: ${tr.nx}</div></div>
+       <b class="mono" style="color:rgb(${gapColor(Math.abs(g)).slice(0,3)})">${g > 0 ? "+" : ""}${g}s</b></div>`).join("");
+    if (!scrubbing) document.getElementById("C-scrub").value = Math.floor(simT);
+  }
+}
+
+// ---------- variant switching ----------
+function setVariant(v) {
+  variant = v; const u = new URL(location); u.searchParams.set("variant", v); history.replaceState(null, "", u);
+  document.querySelectorAll("[data-v]").forEach(el => el.style.display = el.dataset.v === v ? "" : "none");
+  document.getElementById("A-chat").classList.add("hidden");
+  document.getElementById("vlabel").textContent = `${v} (${VARIANTS[v]})`;
+  const pad = v === "B" ? { left: 420, top: 40, right: 40, bottom: 40 } : { left: 40, top: 40, right: 40, bottom: 40 };
+  if (v === "B") map.fitBounds([[-73.99, 40.705], [-73.945, 40.81]], { padding: pad, duration: 900 });
+  else map.easeTo({ center: [-73.94, 40.72], zoom: 11, padding: pad, duration: 900 });
+}
+const keys = Object.keys(VARIANTS);
+const step = d => setVariant(keys[(keys.indexOf(variant) + d + keys.length) % keys.length]);
+document.getElementById("prev").onclick = () => step(-1);
+document.getElementById("next").onclick = () => step(1);
+addEventListener("keydown", e => { if (e.target.closest("input,textarea,[contenteditable]")) return;
+  if (e.key === "ArrowLeft") step(-1); if (e.key === "ArrowRight") step(1); });
+document.querySelectorAll("#speed button").forEach(b => b.onclick = () => {
+  speed = +b.dataset.s; document.querySelectorAll("#speed button").forEach(x => x.classList.toggle("on", x === b)); });
+const scrub = document.getElementById("C-scrub");
+scrub.oninput = () => { scrubbing = true; simT = +scrub.value; };
+scrub.onchange = () => { scrubbing = false; };
+
+// ---------- loop ----------
+let panelTick = 0;
+function frame(now) {
+  if (!scrubbing) simT = (simT + (now - last) / 1000 * speed) % HORIZON;
+  last = now;
+  overlay.setProps({ layers: layers() });
+  if (now - panelTick > 250) { updatePanels(); panelTick = now; }
+  requestAnimationFrame(frame);
+}
+setVariant(keys.includes(variant) ? variant : "A");
+map.on("load", () => requestAnimationFrame(frame));
+</script>
+</body>
+</html>
